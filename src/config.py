@@ -10,3 +10,7 @@ DISTANCE_BANDS = [
     (30.0, 50.0, 0.35),
     (50.0, float("inf"), 0.50),
 ]
+# Road / ground geometry settings
+ROAD_CELL_SIZE = 1.0
+ROAD_MIN_POINTS = 5
+ROAD_HEIGHT_THRESHOLD = 0.15

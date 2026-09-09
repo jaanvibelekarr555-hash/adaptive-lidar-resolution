@@ -1,0 +1,6 @@
+frame,total_cells,drivable_cells,non_drivable_cells,sparse_cells,processing_time_seconds
+000000,263,200,32,31,0.1793
+000001,436,345,22,69,0.2156
+000002,202,168,16,18,0.2186
+000003,199,152,19,28,0.242
+000004,506,447,6,53,0.2067
