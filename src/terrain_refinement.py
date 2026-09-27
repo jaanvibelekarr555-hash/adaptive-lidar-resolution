@@ -112,15 +112,31 @@ def build_terrain_refinement_request(
 ) -> dict:
     """
     Build the terrain refinement request passed to
-    the adaptive resolution engine.
+    the adaptive resolution system.
+
+    The request contains both:
+
+        base_resolution:
+            Distance-based base map resolution.
+
+        requested_resolution:
+            Terrain-requested refinement resolution.
+            This remains an upper bound for local
+            hierarchical refinement.
 
     Returns:
         Dictionary containing:
         - region
+        - base_resolution
         - requested_resolution
         - priority
         - reason
     """
+
+    if base_resolution <= 0:
+        raise ValueError(
+            "base_resolution must be greater than zero."
+        )
 
     if not 0.0 <= priority <= 1.0:
         raise ValueError(
@@ -200,9 +216,18 @@ def build_terrain_refinement_request(
 
     return {
         "region": region,
-        "requested_resolution": requested_resolution,
+
+        "base_resolution": float(
+            base_resolution
+        ),
+
+        "requested_resolution": (
+            requested_resolution
+        ),
+
         "priority": float(
             np.clip(priority, 0.0, 1.0)
         ),
+
         "reason": reason,
     }

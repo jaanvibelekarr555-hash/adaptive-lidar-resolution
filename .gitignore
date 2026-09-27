@@ -5,5 +5,22 @@
 __pycache__/
 *.pyc
 
+# Test/cache files
+.pytest_cache/
+
 # LiDAR datasets
 data/
+
+# Generated standalone result HTMLs
+results/*.html
+
+# Local/generated project artifacts
+/folder_structure.txt
+/index.html
+/terrain-handoff.zip
+
+# Old demo backup/candidate files
+scripts/final_adaptive_lidar_demo_backup_before_final.py
+scripts/final_adaptive_lidar_demo_v2.py
+scripts/final_adaptive_lidar_demo_v4_backup.py
+scripts/final_adaptive_lidar_demo_v5_before_plotly_fix.py

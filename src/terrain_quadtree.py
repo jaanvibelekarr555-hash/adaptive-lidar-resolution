@@ -51,6 +51,13 @@ def _validate_point_indices(
             "point_indices contain invalid data indices."
         )
 
+    if len(np.unique(point_indices)) != len(
+        point_indices
+    ):
+        raise ValueError(
+            "point_indices must be unique."
+        )
+
     return point_indices
 
 
@@ -93,7 +100,9 @@ def _get_node_points(
 
     id_to_local_index = {
         int(point_id): index
-        for index, point_id in enumerate(point_ids)
+        for index, point_id in enumerate(
+            point_ids
+        )
     }
 
     try:
@@ -115,6 +124,284 @@ def _get_node_points(
     )
 
 
+def _build_resolution_anchored_base_grid(
+    root,
+    points: np.ndarray,
+    point_ids: np.ndarray,
+    target_resolution: float,
+) -> None:
+    """
+    Create exact distance-based base-resolution tiles
+    inside the original terrain-analysis region.
+
+    The terrain analysis region is normally 1 m x 1 m.
+
+    Unlike binary quadtree subdivision, this stage directly
+    creates occupied base-resolution tiles. This allows the
+    shared distance-resolution values to remain actual map
+    resolutions:
+
+        0.05 m
+        0.10 m
+        0.25 m
+        0.50 m
+
+    After this base grid is created, ordinary 4-way quadtree
+    subdivision is used for terrain-driven refinement.
+    """
+
+    if root.point_count == 0:
+        return
+
+    target_resolution = _validate_resolution(
+        target_resolution,
+        "target_resolution",
+    )
+
+    if (
+        np.isclose(
+            root.cell_size,
+            target_resolution,
+            rtol=1e-10,
+            atol=1e-12,
+        )
+        or root.cell_size < target_resolution
+    ):
+        return
+
+    x_min = float(
+        root.bbox["x_min"]
+    )
+    x_max = float(
+        root.bbox["x_max"]
+    )
+    y_min = float(
+        root.bbox["y_min"]
+    )
+    y_max = float(
+        root.bbox["y_max"]
+    )
+
+    width = x_max - x_min
+    height = y_max - y_min
+
+    if width <= 0 or height <= 0:
+        raise ValueError(
+            "Root bbox must have positive dimensions."
+        )
+
+    if not np.isclose(
+        width,
+        height,
+    ):
+        raise ValueError(
+            "Terrain quadtree root bbox must be square."
+        )
+
+    number_of_cells = int(
+        np.ceil(
+            width / target_resolution
+        )
+    )
+
+    if number_of_cells <= 0:
+        raise ValueError(
+            "Invalid base-resolution grid size."
+        )
+
+    tile_width = (
+        width / number_of_cells
+    )
+
+    tile_height = (
+        height / number_of_cells
+    )
+
+    if tile_width > target_resolution + 1e-12:
+        raise RuntimeError(
+            "Base grid cell size exceeds target resolution."
+        )
+
+    if tile_height > target_resolution + 1e-12:
+        raise RuntimeError(
+            "Base grid cell height exceeds target resolution."
+        )
+
+    point_ids = np.asarray(
+        point_ids,
+        dtype=np.int64,
+    )
+
+    id_to_local_index = {
+        int(point_id): index
+        for index, point_id in enumerate(
+            point_ids
+        )
+    }
+
+    node_point_ids = np.asarray(
+        root.point_indices,
+        dtype=np.int64,
+    )
+
+    grid_points = {}
+
+    for point_id in node_point_ids:
+
+        local_index = id_to_local_index.get(
+            int(point_id)
+        )
+
+        if local_index is None:
+            raise ValueError(
+                "Root contains a point ID that is not "
+                "present in point_ids."
+            )
+
+        x = float(
+            points[
+                local_index,
+                0,
+            ]
+        )
+
+        y = float(
+            points[
+                local_index,
+                1,
+            ]
+        )
+
+        if not np.isfinite(
+            [x, y]
+        ).all():
+            raise ValueError(
+                "points must contain finite X/Y values."
+            )
+
+        grid_x = int(
+            np.floor(
+                (
+                    x - x_min
+                )
+                / tile_width
+            )
+        )
+
+        grid_y = int(
+            np.floor(
+                (
+                    y - y_min
+                )
+                / tile_height
+            )
+        )
+
+        # Include points exactly on the maximum
+        # boundary in the final tile.
+        grid_x = min(
+            max(grid_x, 0),
+            number_of_cells - 1,
+        )
+
+        grid_y = min(
+            max(grid_y, 0),
+            number_of_cells - 1,
+        )
+
+        key = (
+            grid_x,
+            grid_y,
+        )
+
+        if key not in grid_points:
+            grid_points[key] = []
+
+        grid_points[key].append(
+            int(point_id)
+        )
+
+    children = []
+
+    for (
+        grid_x,
+        grid_y,
+    ), child_point_ids in sorted(
+        grid_points.items()
+    ):
+
+        child_x_min = (
+            x_min
+            + grid_x * tile_width
+        )
+
+        child_x_max = (
+            x_min
+            + (grid_x + 1)
+            * tile_width
+        )
+
+        child_y_min = (
+            y_min
+            + grid_y * tile_height
+        )
+
+        child_y_max = (
+            y_min
+            + (grid_y + 1)
+            * tile_height
+        )
+
+        child = type(root)(
+            bbox={
+                "x_min": float(
+                    child_x_min
+                ),
+                "x_max": float(
+                    child_x_max
+                ),
+                "y_min": float(
+                    child_y_min
+                ),
+                "y_max": float(
+                    child_y_max
+                ),
+            },
+            point_indices=[
+                int(point_id)
+                for point_id in child_point_ids
+            ],
+            depth=root.depth + 1,
+        )
+
+        children.append(
+            child
+        )
+
+    if not children:
+        raise RuntimeError(
+            "Base-resolution grid produced no occupied tiles."
+        )
+
+    root.children = children
+
+    # Ownership moves from the root to the occupied
+    # base-resolution children.
+    root.point_indices = []
+
+    child_point_count = sum(
+        child.point_count
+        for child in root.children
+    )
+
+    if child_point_count != (
+        len(node_point_ids)
+    ):
+        raise RuntimeError(
+            "Base-resolution grid changed the point count."
+        )
+
+
 def _refine_node_to_requested_resolution(
     node,
     points: np.ndarray,
@@ -122,17 +409,25 @@ def _refine_node_to_requested_resolution(
     target_resolution: float,
 ) -> None:
     """
-    Refine a node until its cell size is less than or equal
-    to the requested terrain resolution.
+    Refine a base-resolution tile using ordinary 4-way
+    quadtree subdivision until its cell size is less than
+    or equal to the requested terrain resolution.
 
-    The requested resolution is treated as an upper bound
-    on occupied leaf cell size.
+    The requested resolution remains an upper bound.
     """
 
     if node.point_count == 0:
         return
 
-    if node.cell_size <= target_resolution:
+    if (
+        np.isclose(
+            node.cell_size,
+            target_resolution,
+            rtol=1e-10,
+            atol=1e-12,
+        )
+        or node.cell_size < target_resolution
+    ):
         return
 
     before_count = node.point_count
@@ -154,6 +449,7 @@ def _refine_node_to_requested_resolution(
         )
 
     for child in node.children:
+
         _refine_node_to_requested_resolution(
             node=child,
             points=points,
@@ -183,9 +479,19 @@ def _refine_node_with_error_bound(
     if node.point_count == 0:
         return
 
-    next_cell_size = node.cell_size / 2.0
+    next_cell_size = (
+        node.cell_size / 2.0
+    )
 
-    if next_cell_size < min_resolution:
+    if (
+        next_cell_size < min_resolution
+        and not np.isclose(
+            next_cell_size,
+            min_resolution,
+            rtol=1e-10,
+            atol=1e-12,
+        )
+    ):
         return
 
     node_points = _get_node_points(
@@ -197,7 +503,9 @@ def _refine_node_with_error_bound(
     decision = decide_terrain_error_bound(
         points=node_points,
         max_plane_residual=max_plane_residual,
-        max_elevation_variation=max_elevation_variation,
+        max_elevation_variation=(
+            max_elevation_variation
+        ),
     )
 
     if not decision["split"]:
@@ -222,13 +530,16 @@ def _refine_node_with_error_bound(
         )
 
     for child in node.children:
+
         _refine_node_with_error_bound(
             node=child,
             points=points,
             point_ids=point_ids,
             min_resolution=min_resolution,
             max_plane_residual=max_plane_residual,
-            max_elevation_variation=max_elevation_variation,
+            max_elevation_variation=(
+                max_elevation_variation
+            ),
         )
 
 
@@ -247,18 +558,30 @@ def build_terrain_quadtree_for_cell(
     ),
 ) -> dict:
     """
-    Build a quadtree for one terrain cell.
+    Build a resolution-anchored terrain hierarchy
+    for one terrain-analysis cell.
 
-    Refinement happens in two stages:
+    Refinement happens in three stages:
 
-    1. Reach the terrain-requested resolution.
-    2. Apply the terrain geometric error bound for
-       additional local refinement.
+    1. Create exact distance-based base-resolution tiles.
+    2. Apply terrain-requested refinement using ordinary
+       4-way quadtree subdivision.
+    3. Apply terrain geometric error-bound refinement.
+
+    The distance-based base resolution is read from:
+
+        refinement_request["base_resolution"]
+
+    For backward compatibility, when this field is absent,
+    the requested resolution is used as the base resolution.
     """
 
     _validate_data(data)
 
-    if not isinstance(cell, dict):
+    if not isinstance(
+        cell,
+        dict,
+    ):
         raise ValueError(
             "cell must be a dictionary."
         )
@@ -286,16 +609,36 @@ def build_terrain_quadtree_for_cell(
             "refinement_request must be a dictionary."
         )
 
-    if "requested_resolution" not in refinement_request:
+    if "requested_resolution" not in (
+        refinement_request
+    ):
         raise ValueError(
             "refinement_request must contain "
             "requested_resolution."
         )
 
     requested_resolution = _validate_resolution(
-        refinement_request["requested_resolution"],
+        refinement_request[
+            "requested_resolution"
+        ],
         "requested_resolution",
     )
+
+    base_resolution = _validate_resolution(
+        refinement_request.get(
+            "base_resolution",
+            requested_resolution,
+        ),
+        "base_resolution",
+    )
+
+    if requested_resolution > (
+        base_resolution + 1e-12
+    ):
+        raise ValueError(
+            "requested_resolution must not be greater "
+            "than base_resolution."
+        )
 
     max_plane_residual = _validate_resolution(
         max_plane_residual,
@@ -323,7 +666,10 @@ def build_terrain_quadtree_for_cell(
         )
 
     points = np.asarray(
-        data[point_indices, :3],
+        data[
+            point_indices,
+            :3,
+        ],
         dtype=float,
     )
 
@@ -335,18 +681,39 @@ def build_terrain_quadtree_for_cell(
 
     # --------------------------------------------------
     # Stage 1:
-    # Reach terrain-requested resolution.
+    # Create exact distance-based base-resolution tiles.
     # --------------------------------------------------
 
-    _refine_node_to_requested_resolution(
-        node=root,
+    _build_resolution_anchored_base_grid(
+        root=root,
         points=points,
         point_ids=point_indices,
-        target_resolution=requested_resolution,
+        target_resolution=base_resolution,
     )
 
     # --------------------------------------------------
     # Stage 2:
+    # Apply terrain-requested refinement.
+    # --------------------------------------------------
+
+    base_leaves = get_leaf_nodes(
+        root
+    )
+
+    for leaf in base_leaves:
+
+        if leaf.point_count == 0:
+            continue
+
+        _refine_node_to_requested_resolution(
+            node=leaf,
+            points=points,
+            point_ids=point_indices,
+            target_resolution=requested_resolution,
+        )
+
+    # --------------------------------------------------
+    # Stage 3:
     # Apply terrain error-bound refinement.
     # --------------------------------------------------
 
@@ -365,7 +732,9 @@ def build_terrain_quadtree_for_cell(
             point_ids=point_indices,
             min_resolution=min_resolution,
             max_plane_residual=max_plane_residual,
-            max_elevation_variation=max_elevation_variation,
+            max_elevation_variation=(
+                max_elevation_variation
+            ),
         )
 
     # --------------------------------------------------
@@ -377,10 +746,12 @@ def build_terrain_quadtree_for_cell(
         point_indices,
     ):
         raise RuntimeError(
-            "Terrain quadtree changed the point set."
+            "Terrain hierarchy changed the point set."
         )
 
-    leaves = get_leaf_nodes(root)
+    leaves = get_leaf_nodes(
+        root
+    )
 
     occupied_leaves = [
         leaf
@@ -401,61 +772,121 @@ def build_terrain_quadtree_for_cell(
         error_bound = decide_terrain_error_bound(
             points=leaf_points,
             max_plane_residual=max_plane_residual,
-            max_elevation_variation=max_elevation_variation,
+            max_elevation_variation=(
+                max_elevation_variation
+            ),
         )
 
         leaf_records.append(
             {
-                "bbox": dict(leaf.bbox),
+                "bbox": dict(
+                    leaf.bbox
+                ),
+
                 "point_indices": list(
                     leaf.point_indices
                 ),
-                "point_count": leaf.point_count,
-                "depth": leaf.depth,
-                "cell_size": leaf.cell_size,
-                "error_bound_split": error_bound[
-                    "split"
-                ],
-                "error_bound_reason": error_bound[
-                    "reason"
-                ],
-                "error_metrics": error_bound[
-                    "metrics"
-                ],
+
+                "point_count": (
+                    leaf.point_count
+                ),
+
+                "depth": (
+                    leaf.depth
+                ),
+
+                "cell_size": (
+                    leaf.cell_size
+                ),
+
+                "base_resolution": (
+                    base_resolution
+                ),
+
+                "requested_resolution": (
+                    requested_resolution
+                ),
+
+                "error_bound_split": (
+                    error_bound[
+                        "split"
+                    ]
+                ),
+
+                "error_bound_reason": (
+                    error_bound[
+                        "reason"
+                    ]
+                ),
+
+                "error_metrics": (
+                    error_bound[
+                        "metrics"
+                    ]
+                ),
             }
         )
 
     return {
         "cell_id": cell["cell_id"],
-        "bbox": dict(cell["bbox"]),
-        "requested_resolution": requested_resolution,
+
+        "bbox": dict(
+            cell["bbox"]
+        ),
+
+        "base_resolution": (
+            base_resolution
+        ),
+
+        "requested_resolution": (
+            requested_resolution
+        ),
+
         "priority": refinement_request.get(
             "priority"
         ),
+
         "reason": refinement_request.get(
             "reason"
         ),
+
         "root": root,
+
         "leaves": leaf_records,
-        "point_count": len(point_indices),
+
+        "point_count": len(
+            point_indices
+        ),
+
         "leaf_point_count": sum(
             leaf["point_count"]
             for leaf in leaf_records
         ),
+
         "error_bound": {
-            "max_plane_residual": max_plane_residual,
+            "max_plane_residual": (
+                max_plane_residual
+            ),
             "max_elevation_variation": (
                 max_elevation_variation
             ),
-            "min_resolution": min_resolution,
+            "min_resolution": (
+                min_resolution
+            ),
         },
     }
 
 
 def build_terrain_quadtree_map(
     data: np.ndarray,
-    cells: dict[tuple[int, int], dict],
-    analyzed_cells: dict[tuple[int, int], dict],
+    cells: dict[
+        tuple[int, int],
+        dict,
+    ],
+    analyzed_cells: dict[
+        tuple[int, int],
+        dict,
+    ],
     max_plane_residual: float = (
         DEFAULT_MAX_PLANE_RESIDUAL
     ),
@@ -465,14 +896,21 @@ def build_terrain_quadtree_map(
     min_resolution: float = (
         DEFAULT_MIN_TERRAIN_RESOLUTION
     ),
-) -> dict[tuple[int, int], dict]:
+) -> dict[
+    tuple[int, int],
+    dict,
+]:
     """
-    Build terrain quadtrees for all analyzed terrain cells.
+    Build terrain hierarchies for all analyzed
+    terrain-analysis cells.
     """
 
     _validate_data(data)
 
-    if not isinstance(cells, dict):
+    if not isinstance(
+        cells,
+        dict,
+    ):
         raise ValueError(
             "cells must be a dictionary."
         )
@@ -498,8 +936,10 @@ def build_terrain_quadtree_map(
             cell_id
         ]
 
-        refinement_request = analyzed_cell.get(
-            "refinement_request"
+        refinement_request = (
+            analyzed_cell.get(
+                "refinement_request"
+            )
         )
 
         if refinement_request is None:
@@ -507,26 +947,37 @@ def build_terrain_quadtree_map(
                 f"Terrain cell {cell_id} has no refinement request."
             )
 
-        terrain_quadtree_map[cell_id] = (
-            build_terrain_quadtree_for_cell(
-                data=data,
-                cell=cell,
-                refinement_request=refinement_request,
-                max_plane_residual=max_plane_residual,
-                max_elevation_variation=max_elevation_variation,
-                min_resolution=min_resolution,
-            )
+        terrain_quadtree_map[
+            cell_id
+        ] = build_terrain_quadtree_for_cell(
+            data=data,
+            cell=cell,
+            refinement_request=(
+                refinement_request
+            ),
+            max_plane_residual=(
+                max_plane_residual
+            ),
+            max_elevation_variation=(
+                max_elevation_variation
+            ),
+            min_resolution=(
+                min_resolution
+            ),
         )
 
     return terrain_quadtree_map
 
 
 def collect_terrain_leaf_point_ids(
-    terrain_quadtree_map: dict[tuple[int, int], dict],
+    terrain_quadtree_map: dict[
+        tuple[int, int],
+        dict,
+    ],
 ) -> np.ndarray:
     """
     Collect all original point IDs from all terrain
-    quadtree leaves.
+    hierarchy leaves.
     """
 
     if not isinstance(
@@ -559,11 +1010,14 @@ def collect_terrain_leaf_point_ids(
 
 
 def validate_terrain_quadtree_point_conservation(
-    terrain_quadtree_map: dict[tuple[int, int], dict],
+    terrain_quadtree_map: dict[
+        tuple[int, int],
+        dict,
+    ],
     expected_point_ids: np.ndarray,
 ) -> bool:
     """
-    Verify that the complete terrain quadtree map contains
+    Verify that the complete terrain hierarchy contains
     every expected original point ID exactly once.
     """
 
@@ -577,14 +1031,18 @@ def validate_terrain_quadtree_point_conservation(
             "expected_point_ids must be one-dimensional."
         )
 
-    if len(np.unique(expected)) != len(expected):
+    if len(
+        np.unique(expected)
+    ) != len(expected):
         return False
 
     actual = collect_terrain_leaf_point_ids(
         terrain_quadtree_map
     )
 
-    if len(np.unique(actual)) != len(actual):
+    if len(
+        np.unique(actual)
+    ) != len(actual):
         return False
 
     if len(actual) != len(expected):
